@@ -1,71 +1,82 @@
-import asyncio
 import logging
-import os
-from datetime import datetime
-from pytz import timezone
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-import requests
+import asyncio
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import requests
+import os
 
-# Логирование
-logging.basicConfig(level=logging.INFO)
-
-# Переменные окружения
+# Проверка токенов
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENWEATHER_TOKEN = os.getenv("OPENWEATHER_TOKEN")
 
-# Список пользователей и их городов
-users = {
-    '@kkkv22': {'name': 'Женя', 'city': 'Warsaw', 'timezone': 'Europe/Warsaw'},
-    'nikita': {'name': 'Никита', 'city': 'Warsaw', 'timezone': 'Europe/Warsaw'},
-    '@roman_babun': {'name': 'Рома', 'city': 'Rivne', 'timezone': 'Europe/Kiev'},
-    '@viktip09': {'name': 'Витек', 'city': 'Kelowna', 'timezone': 'America/Vancouver'},
+if not TELEGRAM_TOKEN or not OPENWEATHER_TOKEN:
+    raise ValueError("Токены TELEGRAM_TOKEN и OPENWEATHER_TOKEN не заданы в переменных окружения!")
+
+USERS = {
+    "Женя": {"chat_id": "kkkv22", "city": "Warsaw"},  # username без @
+    "Никита": {"chat_id": 123456789, "city": "Warsaw"},  # числовой ID (замени на реальный)
+    "Рома": {"chat_id": "roman_babun", "city": "Rivne"},  # username без @
+    "Витек": {"chat_id": "viktip09", "city": "Kelowna"},  # username без @
 }
 
-admin_username = 'вставь_сюда_юзернейм_Вити'  # например: '@admin'
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
-# Получение погоды
-def get_weather(city: str):
-    url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={OPENWEATHER_TOKEN}&units=metric&lang=ru"
-    response = requests.get(url)
-    data = response.json()
-
-    if response.status_code == 200:
-        temp = data["main"]["temp"]
-        description = data["weather"][0]["description"]
-        return f"{description.capitalize()}, {temp}°C"
-    else:
-        return "Не удалось получить погоду."
-
-# Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! Я бот прогноза погоды ☀️")
+    await update.message.reply_text("Бот запущен и готов отправлять погоду!")
 
-# Отправка погоды по расписанию
+def get_weather(city: str) -> str:
+    url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={OPENWEATHER_TOKEN}&units=metric&lang=ru"
+    try:
+        response = requests.get(url).json()
+        if response.get("cod") != 200:
+            logger.error(f"Ошибка API OpenWeather: {response}")
+            return "Не удалось получить погоду."
+        weather = response["weather"][0]["description"]
+        temp = response["main"]["temp"]
+        return f"Погода в {city}: {weather}, {temp}°C"
+    except Exception as e:
+        logger.error(f"Ошибка запроса погоды: {e}")
+        return "Ошибка при запросе к API."
+
 async def send_weather(application):
-    for user, info in users.items():
-        weather = get_weather(info["city"])
-        now = datetime.now(timezone(info["timezone"])).strftime("%H:%M %d.%m")
-        message = f"Погода для {info['name']} в {info['city']} на {now}:\n{weather}"
-
+    for user, data in USERS.items():
         try:
-            await application.bot.send_message(chat_id=user, text=message)
+            weather = get_weather(data["city"])
+            await application.bot.send_message(
+                chat_id=data["chat_id"],
+                text=weather
+            )
+            logger.info(f"Погода отправлена для {user}")
         except Exception as e:
-            logging.warning(f"Не удалось отправить сообщение {user}: {e}")
+            logger.error(f"Ошибка при отправке для {user}: {e}")
 
-# Главная функция
 async def main():
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
+    try:
+        application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+        application.add_handler(CommandHandler("start", start))
 
-    # Планировщик
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(send_weather, 'cron', hour=8, minute=0, args=[app])  # каждый день в 08:00
-    scheduler.start()
+        scheduler = AsyncIOScheduler()
+        scheduler.add_job(
+            send_weather,
+            "cron",
+            hour=9,
+            minute=0,
+            args=[application]
+        )
+        scheduler.start()
 
-    print("Бот запущен.")
-    await app.run_polling()
+        logger.info("Бот запущен и ожидает сообщений...")
+        await application.run_polling(timeout=10)
+
+    except Exception as e:
+        logger.critical(f"Бот упал с ошибкой: {e}")
+        raise
 
 if __name__ == "__main__":
     asyncio.run(main())
